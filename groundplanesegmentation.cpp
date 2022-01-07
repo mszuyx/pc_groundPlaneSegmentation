@@ -12,6 +12,7 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/radius_outlier_removal.h>
+#include <pcl/filters/crop_box.h>
 // Import eigen lib
 #include <Eigen/Dense>
 // Import message_filters lib
@@ -55,6 +56,7 @@ private:
     std::string base_FrameId;
     double radius_search_;
     int in_radius_;
+    double alpha;
     
     // Sync settings
     message_filters::Subscriber<sensor_msgs::PointCloud2> points_node_sub_;
@@ -68,9 +70,9 @@ private:
     void rotateVectorByQuaternion(double x, double y, double z, double q0, double q1, double q2, double q3, double& vx, double& vy, double& vz);
     void quaternionToMatrix(double q0, double q1, double q2, double q3,  Affine3d& transform);
     void imuNormal_update(double p0, double p1, double p2, double p3);
-    void findMean(const pcl::PointCloud<pcl::PointXYZ>& pc, Eigen::Vector3d& pc_mean);
+    void findMean(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, Eigen::Vector3d& pc_mean);
     void estimate_plane_(void);
-    void extract_initial_seeds_(const pcl::PointCloud<pcl::PointXYZ>& p_sorted);
+    void extract_initial_seeds_(const pcl::PointCloud<pcl::PointXYZ>::Ptr& p_sorted);
     void rs_pc_callback_ (const sensor_msgs::PointCloud2ConstPtr& input_cloud, const sensor_msgs::Imu::ConstPtr& imu_msg);
     
     // Model parameter for ground plane fitting
@@ -78,6 +80,7 @@ private:
     double d_;
     MatrixXd normal_imu{3,1};
     double th_dist_d_;
+    double last_lpr;
 };
 
 GroundPlaneSeg::GroundPlaneSeg():node_handle_("~"){
@@ -108,18 +111,21 @@ GroundPlaneSeg::GroundPlaneSeg():node_handle_("~"){
     node_handle_.param("map_unit_size_", map_unit_size_, 0.1); 
     ROS_INFO("map_unit_size_: %f", map_unit_size_);
 
-    node_handle_.param("radius_search_", radius_search_, 0.8);
+    node_handle_.param("radius_search_", radius_search_, 0.5);
     ROS_INFO("radius_search_: %f", radius_search_);
 
-    node_handle_.param("in_radius_", in_radius_, 3);
+    node_handle_.param("in_radius_", in_radius_, -3);
     ROS_INFO("in_radius_: %d", in_radius_);
     
+    node_handle_.param("alpha", alpha, 0.3);
+    ROS_INFO("moving average factor alpha: %f", alpha);
+
     //node_handle_.param<std::string>("frame_id", base_FrameId, "/base_link");
     //ROS_INFO("robot base frame_id: %s", base_FrameId.c_str());
     
     // Subscribe to realsense topic
-    points_node_sub_.subscribe(node_handle_, "/cloud_in", 5);
-    imu_node_sub_.subscribe(node_handle_, "/imu/data", 100);
+    points_node_sub_.subscribe(node_handle_, "/cloud_in", 1); //5
+    imu_node_sub_.subscribe(node_handle_, "/imu/data", 1);  //100
     // ApproximateTime takes a queue size as its constructor argument, hence RSSyncPolicy(xx)
     sync.reset(new Sync(RSSyncPolicy(10), points_node_sub_, imu_node_sub_));   
     sync->registerCallback(boost::bind(&GroundPlaneSeg::rs_pc_callback_, this, _1, _2));
@@ -143,6 +149,7 @@ GroundPlaneSeg::GroundPlaneSeg():node_handle_("~"){
     // =======================================================================================================
     
     normal_imu << 0.0,1.0,0.0;
+    last_lpr = sensor_height_;
 }
 
 void GroundPlaneSeg::quaternionMultiplication(double p0, double p1, double p2, double p3,
@@ -197,15 +204,15 @@ void GroundPlaneSeg::imuNormal_update(double q0, double q1, double q2, double q3
      normal_imu << lx,ly,-lz;
 }
 
-void GroundPlaneSeg::findMean(const pcl::PointCloud<pcl::PointXYZ>& pc, Eigen::Vector3d& pc_mean){
+void GroundPlaneSeg::findMean(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, Eigen::Vector3d& pc_mean){
     double x_sum = 0;
     double y_sum = 0;
     double z_sum = 0;
     int cnt = 0;
-    for(size_t i=0;i<pc.points.size();i++){
-        x_sum += double(pc.points[i].x);
-        y_sum += double(pc.points[i].y);
-        z_sum += double(pc.points[i].z);
+    for(size_t i=0;i<pc->points.size();i++){
+        x_sum += double(pc->points[i].x);
+        y_sum += double(pc->points[i].y);
+        z_sum += double(pc->points[i].z);
         cnt++;
     }
     x_sum = cnt!=0?x_sum/cnt:0;
@@ -217,7 +224,7 @@ void GroundPlaneSeg::findMean(const pcl::PointCloud<pcl::PointXYZ>& pc, Eigen::V
 void GroundPlaneSeg::estimate_plane_(void){
     // Create covarian matrix in single pass.
     Eigen::Vector3d seeds_mean;
-    findMean(*ground_pc, seeds_mean);
+    findMean(ground_pc, seeds_mean);
 
     // according to normal.T*[x,y,z] = -d
     // d_ = -(normal_imu.transpose()*seeds_mean)(0,0);
@@ -229,23 +236,27 @@ void GroundPlaneSeg::estimate_plane_(void){
     // return the equation parameters
 }
 
-void GroundPlaneSeg::extract_initial_seeds_(const pcl::PointCloud<pcl::PointXYZ>& p_sorted){
+void GroundPlaneSeg::extract_initial_seeds_(const pcl::PointCloud<pcl::PointXYZ>::Ptr& p_sorted){
     // LPR is the mean of low point representative
     double sum = 0;
     int cnt = 0;
     // Calculate the mean height value.
-    for(size_t i=0;i<p_sorted.points.size() && cnt<num_lpr_;i++){
-        sum += double(p_sorted.points[i].y);
+    for(size_t i=0;i<p_sorted->points.size() && cnt<num_lpr_;i++){
+        sum += double(p_sorted->points[i].y);
         cnt++;
     }
     double lpr_height = cnt!=0?sum/cnt:0;// in case divide by 0
+    lpr_height = (alpha*last_lpr) + ((1-alpha)*lpr_height);
+    
     seeds_pc->clear();
     // iterate pointcloud, filter those height is less than lpr.height+th_seeds_
-    for(size_t i=0;i<p_sorted.points.size();i++){
-        if(double(p_sorted.points[i].y) > lpr_height + th_seeds_){
-            seeds_pc->points.push_back(p_sorted.points[i]);
+    for(size_t i=0;i<p_sorted->points.size();i++){
+        if(double(p_sorted->points[i].y) > lpr_height + th_seeds_){
+            seeds_pc->points.push_back(p_sorted->points[i]);
         }
     }
+    last_lpr = lpr_height;
+    // std::cout << last_lpr << std::endl;
     // return seeds points
 }
 
@@ -295,47 +306,37 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2ConstPtr& in
      pcl::transformPointCloud(*cloud_raw, *cloud_raw, sensorToRobot);
      */
      
-     // 4.Clip based on box threshold.
-     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_org (new pcl::PointCloud<pcl::PointXYZ> ());
-     for(size_t i=0;i<cloud_raw->points.size();i++){
-       if(double(cloud_raw->points[i].x*cloud_raw->points[i].x+cloud_raw->points[i].z*cloud_raw->points[i].z) <= th_box_*th_box_ && double(cloud_raw->points[i].y) <= 1.5*sensor_height_){
-     	 cloud_org->points.push_back(cloud_raw->points[i]);
-     	 }
-     }
-
-     // 5.Transform pointcloud w.r.t IMU reading
+     // 4.Transform pointcloud w.r.t IMU reading
      Affine3d transform;
      quaternionToMatrix(q0_in, q1_in, q2_in, q3_in, transform);
+     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_org (new pcl::PointCloud<pcl::PointXYZ> ());
+     pcl::transformPointCloud (*cloud_raw, *cloud_org, transform);
+
+     // 5.Clip based on box threshold.
      pcl::PointCloud<pcl::PointXYZ>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZ> ());
+     pcl::CropBox<pcl::PointXYZ> boxFilter;
+     boxFilter.setMin(Eigen::Vector4f(-th_box_, -1.5, 0.0, 1.0));
+     boxFilter.setMax(Eigen::Vector4f(th_box_, 1.5*sensor_height_, th_box_, 1.0));
+     boxFilter.setInputCloud(cloud_org);
+     boxFilter.filter(*cloud);
+     pcl::copyPointCloud<pcl::PointXYZ,pcl::PointXYZ>(*cloud, *cloud_org);
+
      // radius removal filter
      if (in_radius_>0){
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_trans (new pcl::PointCloud<pcl::PointXYZ> ());
+        //cloud->clear();
         pcl::RadiusOutlierRemoval<pcl::PointXYZ> outrem;
         outrem.setInputCloud(cloud_org);
         outrem.setRadiusSearch(radius_search_);
         outrem.setMinNeighborsInRadius (in_radius_);
         //outrem.setKeepOrganized(true);
         outrem.filter (*cloud);
-        pcl::transformPointCloud (*cloud, *cloud_trans, transform);
-        pcl::copyPointCloud<pcl::PointXYZ,pcl::PointXYZ>(*cloud_trans, *cloud);
-        pcl::copyPointCloud<pcl::PointXYZ,pcl::PointXYZ>(*cloud, *cloud_org);
-     }else{
-        pcl::transformPointCloud (*cloud_org, *cloud, transform);
-        pcl::copyPointCloud<pcl::PointXYZ,pcl::PointXYZ>(*cloud, *cloud_org);
      }
-    // second filter
-    /*pcl::PointCloud<pcl::PointXYZ>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZ> ());
-    for(size_t i=0;i<cloud_trans->points.size();i++){
-        if(double(cloud_trans->points[i].y) <= 1.5*sensor_height_){
-     	    cloud->points.push_back(cloud_trans->points[i]);
-     	}
-    }*/
 
      // 6.Sort on Y-axis value
      sort(cloud->points.begin(),cloud->end(),point_cmp);
 
      // 7. Extract init ground seeds
-     extract_initial_seeds_(*cloud);
+     extract_initial_seeds_(cloud);
      ground_pc = seeds_pc;
 
      // 8. Ground plane fitter mainloop
