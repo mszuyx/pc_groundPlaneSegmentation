@@ -276,22 +276,17 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2ConstPtr& in
      // 1.Convert pc to pcl::PointXYZ
      pcl::PCLPointCloud2::Ptr input_cloud_pcl (new pcl::PCLPointCloud2 ());
      pcl_conversions::toPCL(*input_cloud, *input_cloud_pcl);
-     //std::cout << input_cloud_pcl->width << std::endl;
-     //std::cout << input_cloud_pcl->height << std::endl;
-     // 2.Apply voxel filter
      pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_raw (new pcl::PointCloud<pcl::PointXYZ> ());
+     pcl::fromPCLPointCloud2(*input_cloud_pcl, *cloud_raw);
+
+     // 2.Apply voxel filter
      if (map_unit_size_>0){
-       pcl::PCLPointCloud2::Ptr cloud_filtered (new pcl::PCLPointCloud2 ());
-       pcl::VoxelGrid<pcl::PCLPointCloud2> sor;
-       sor.setInputCloud (input_cloud_pcl);
-       sor.setLeafSize (float (map_unit_size_),float (map_unit_size_),float (map_unit_size_));
-       sor.filter (*cloud_filtered);
-       pcl::fromPCLPointCloud2(*cloud_filtered, *cloud_raw);
+       pcl::VoxelGrid<pcl::PointXYZ> sor;
+       sor.setInputCloud (cloud_raw);
+       sor.setLeafSize (float (0.1*map_unit_size_),float (map_unit_size_),float (map_unit_size_));
+       sor.filter (*cloud_raw);
      }
-     else{
-       pcl::fromPCLPointCloud2(*input_cloud_pcl, *cloud_raw);
-     }
-     
+
      // 3.Transform pointcloud into robot base_frame
      /*
      tf::StampedTransform sensorToRobotTf;
@@ -321,15 +316,14 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2ConstPtr& in
      boxFilter.filter(*cloud);
      pcl::copyPointCloud<pcl::PointXYZ,pcl::PointXYZ>(*cloud, *cloud_org);
 
-     // radius removal filter
+     // .Apply radius removal filter
      if (in_radius_>0){
-        //cloud->clear();
         pcl::RadiusOutlierRemoval<pcl::PointXYZ> outrem;
-        outrem.setInputCloud(cloud_org);
+        outrem.setInputCloud(cloud);
         outrem.setRadiusSearch(radius_search_);
         outrem.setMinNeighborsInRadius (in_radius_);
         //outrem.setKeepOrganized(true);
-        outrem.filter (*cloud);
+        outrem.filter (*cloud);  
      }
 
      // 6.Sort on Y-axis value
@@ -346,9 +340,9 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2ConstPtr& in
          ground_pc->clear();
          // Threshold filter
          if(i<num_iter_-1){
-         for(size_t r=0;r<cloud_org->points.size();r++){
-             if(double((*cloud_org)[r].y)>th_dist_d_){
-                 ground_pc->points.push_back((*cloud_org)[r]);
+         for(size_t r=0;r<cloud->points.size();r++){ //cloud_org
+             if(double((*cloud)[r].y)>th_dist_d_){ //*cloud_org
+                 ground_pc->points.push_back((*cloud)[r]); //*cloud_org
              }
            } 
          }else{
