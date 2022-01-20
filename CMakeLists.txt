@@ -23,8 +23,8 @@ include_directories(
 find_package(Eigen3 REQUIRED)
 
 #SET(CMAKE_CXX_FLAGS "-std=c++11 -O2 -g -Wall ${CMAKE_CXX_FLAGS}")
-SET(CMAKE_CXX_FLAGS "-std=c++11 -O2 -g -Wall ${CMAKE_CXX_FLAGS}")
-SET(CMAKE_CXX_STANDARD 14)
+SET(CMAKE_CXX_FLAGS "-std=c++17 -O2 -g -Wall ${CMAKE_CXX_FLAGS}")
+SET(CMAKE_CXX_STANDARD 17)#14
 SET(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 #Ground Plane Fitter
@@ -33,13 +33,13 @@ include_directories(${PCL_INCLUDE_DIRS})
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 
-add_executable(groundplanesegmentation groundplanesegmentation.cpp)
+add_executable(pc_gps pc_gps.cpp)
 
-target_include_directories(groundplanesegmentation PRIVATE
+target_include_directories(pc_gps PRIVATE
 	${PCL_INCLUDE_DIRS}
 )
 
-target_link_libraries(groundplanesegmentation
+target_link_libraries(pc_gps
 	${catkin_LIBRARIES}
 	${PCL_LIBRARIES}
 )
