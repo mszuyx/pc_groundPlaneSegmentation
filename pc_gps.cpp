@@ -320,16 +320,7 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2ConstPtr& in
     boxFilter.filter(*cloud);
     pcl::copyPointCloud<pcl::PointXYZ,pcl::PointXYZ>(*cloud, *cloud_raw);
 
-    // 5.Apply statistical outlier removal
-    if (mean_k_>0){
-        pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
-        sor.setInputCloud (cloud);
-        sor.setMeanK (mean_k_);
-        sor.setStddevMulThresh (std_th_);
-        sor.filter (*cloud);
-    }
-
-    // 6.Apply radius removal filter
+    // 5.Apply radius removal filter
     if (in_radius_>0){
         pcl::RadiusOutlierRemoval<pcl::PointXYZ> outrem;
         outrem.setInputCloud(cloud);
@@ -337,6 +328,15 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2ConstPtr& in
         outrem.setMinNeighborsInRadius (in_radius_);
         //outrem.setKeepOrganized(true);
         outrem.filter (*cloud);  
+    }
+
+    // 6.Apply statistical outlier removal
+    if (mean_k_>0){
+        pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
+        sor.setInputCloud (cloud);
+        sor.setMeanK (mean_k_);
+        sor.setStddevMulThresh (std_th_);
+        sor.filter (*cloud);
     }
 
     // 7.Sort on Y-axis value
@@ -378,7 +378,7 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2ConstPtr& in
     ground_msg.header.stamp = input_cloud->header.stamp;
     ground_msg.header.frame_id = input_cloud->header.frame_id;
     ground_points_pub_.publish(ground_msg);
-    // publish not ground points
+    //publish not ground points
     sensor_msgs::PointCloud2 groundless_msg;
     pcl::toROSMsg(*not_ground_pc, groundless_msg);
     groundless_msg.header.stamp = input_cloud->header.stamp;
