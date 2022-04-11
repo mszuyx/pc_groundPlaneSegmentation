@@ -6,10 +6,23 @@ find_package(catkin REQUIRED COMPONENTS
   std_msgs
   pcl_ros
   pcl_conversions
+  std_msgs
+  message_generation
+)
+
+add_message_files(
+  FILES
+  gpParam.msg
+)
+
+generate_messages(
+  DEPENDENCIES
+  std_msgs
 )
 
 catkin_package(CATKIN_DEPENDS
 	sensor_msgs
+	message_runtime
 )
 
 ###########
@@ -34,7 +47,8 @@ include_directories(${PCL_INCLUDE_DIRS})
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 
-add_executable(pc_gps pc_gps.cpp)
+add_executable(pc_gps src/pc_gps.cpp)
+
 
 target_include_directories(pc_gps PRIVATE
 	${PCL_INCLUDE_DIRS}
