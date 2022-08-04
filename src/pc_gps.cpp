@@ -42,6 +42,10 @@ private:
     ros::Publisher ground_points_pub_;
     ros::Publisher groundless_points_pub_;
     ros::Publisher gp_param_pub_;
+    ros::Publisher VGF_pub_;
+    ros::Publisher OA_pub_; 
+    ros::Publisher BC_pub_; 
+    ros::Publisher ROR_pub_;
     //tf::TransformListener tfListener;
 
     // Declare ROS params
@@ -61,6 +65,8 @@ private:
     double alpha;
     bool SVD_refinement;
     bool dense;
+    bool detect_neg;
+    bool debug;
     
     // Sync settings
     message_filters::Subscriber<sensor_msgs::PointCloud2> points_node_sub_;
@@ -74,6 +80,7 @@ private:
     void rotateVectorByQuaternion(double x, double y, double z, double q0, double q1, double q2, double q3, double& vx, double& vy, double& vz);
     void quaternionToMatrix(double q0, double q1, double q2, double q3,  Affine3d& transform);
     void imuNormal_update(double p0, double p1, double p2, double p3);
+    void imuNormal_refine(double ux, double uy, double uz, double q0, double q1, double q2, double q3);
     void findMean(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, Vector3d& pc_mean);
     void estimate_plane_(void);
     void extract_initial_seeds_(const pcl::PointCloud<pcl::PointXYZ>::Ptr& p_sorted);
@@ -137,6 +144,12 @@ GroundPlaneSeg::GroundPlaneSeg():node_handle_("~"){
     node_handle_.param("dense", dense, false);
     ROS_INFO("return dense point cloud?: %d", dense);
 
+    node_handle_.param("detect_neg_obstacle", detect_neg, false);
+    ROS_INFO("detect negative obstacles?: %d", detect_neg);
+
+    node_handle_.param("debug", debug, false);
+    ROS_INFO("Enter debug mode?: %d", debug);
+
     //node_handle_.param<std::string>("frame_id", base_FrameId, "/base_link");
     //ROS_INFO("robot base frame_id: %s", base_FrameId.c_str());
 
@@ -156,6 +169,17 @@ GroundPlaneSeg::GroundPlaneSeg():node_handle_("~"){
     ROS_INFO("Only Ground Output Point Cloud: %s", ground_topic.c_str());
     ground_points_pub_ = node_handle_.advertise<sensor_msgs::PointCloud2>(ground_topic, 1);
 
+    if(debug){
+    std::string VGF_topic, OA_topic, BC_topic, ROR_topic;
+    node_handle_.param<std::string>("VGF_topic", VGF_topic, "/gp_segmentation/cloud/VGF");
+    VGF_pub_ = node_handle_.advertise<sensor_msgs::PointCloud2>(VGF_topic, 1);
+    node_handle_.param<std::string>("OA_topic", OA_topic, "/gp_segmentation/cloud/OA");
+    OA_pub_ = node_handle_.advertise<sensor_msgs::PointCloud2>(OA_topic, 1);
+    node_handle_.param<std::string>("BC_topic", BC_topic, "/gp_segmentation/cloud/BC");
+    BC_pub_ = node_handle_.advertise<sensor_msgs::PointCloud2>(BC_topic, 1);
+    node_handle_.param<std::string>("ROR_topic", ROR_topic, "/gp_segmentation/cloud/ROR");
+    ROR_pub_ = node_handle_.advertise<sensor_msgs::PointCloud2>(ROR_topic, 1);
+    }
     node_handle_.param<std::string>("groundplane_param_topic", gp_param_topic, "/gp_segmentation/param");
     ROS_INFO("Ground plane parameters topic: %s", gp_param_topic.c_str());
     gp_param_pub_ = node_handle_.advertise<pc_gps::gpParam>(gp_param_topic, 1);
@@ -195,19 +219,19 @@ void GroundPlaneSeg::rotateVectorByQuaternion(double x, double y, double z,
 void GroundPlaneSeg::quaternionToMatrix(double q0, double q1, double q2, double q3, Affine3d& transform){
     double t0 = 2 * (q0 * q1 + q2 * q3);
     double t1 = 1 - 2 * (q1 * q1 + q2 * q2);
-    double roll = std::atan2(t0, t1);
+    double pitch = std::atan2(t0, t1);
 
     double t2 = 2 * (q0 * q2 - q3 * q1);
     if (t2 >= 1){t2 = 1.0;}
     else if (t2<= -1){t2 = -1.0;}
-    double pitch = std::asin(t2);
+    double roll = std::asin(t2);
 
     //double t3 = 2 * (q0 * q3 + q1 * q2);
     //double t4 = 1 - 2 * (q2 * q2 + q3 * q3);
     //double yaw = std::atan2(t3, t4);
 
     // axis defined in camera_depth_optical_frame
-    transform = AngleAxisd(pitch, Vector3d::UnitZ()) * AngleAxisd(roll+1.5708, Vector3d::UnitX()); 
+    transform = AngleAxisd(pitch+1.5708, Vector3d::UnitX()) * AngleAxisd(roll, Vector3d::UnitZ());
 }
 
 void GroundPlaneSeg::imuNormal_update(double q0, double q1, double q2, double q3){
@@ -216,13 +240,28 @@ void GroundPlaneSeg::imuNormal_update(double q0, double q1, double q2, double q3
     double q0_tf=0, q1_tf=0, q2_tf=0, q3_tf=1; 
     quaternionMultiplication(q0, q1, q2, q3,
                             q0_tf, q1_tf, q2_tf, q3_tf,
-                            q0_, q1_, q2_, q3_);
+                            q0_, q1_, q2_, q3_); 
     double ux=0, uy=0, uz=1;
     double lx, ly, lz;
     rotateVectorByQuaternion(ux, uy, uz,
                             q0_, -q1_, -q2_, -q3_, 
                             lx, ly, lz);
                                             
+    normal_imu << lx,ly,-lz;
+}
+
+void GroundPlaneSeg::imuNormal_refine(double ux, double uy, double uz,double q0, double q1, double q2, double q3){
+    // Rotate quaternion into proper frame:
+    double q0_, q1_, q2_, q3_; 
+    double q0_tf=0, q1_tf=0, q2_tf=0, q3_tf=1; 
+    quaternionMultiplication(q0, q1, q2, q3,
+                            q0_tf, q1_tf, q2_tf, q3_tf,
+                            q0_, q1_, q2_, q3_);
+    double lx, ly, lz;
+    rotateVectorByQuaternion(ux, uz, uy,
+                            q0_, -q1_, -q2_, -q3_, 
+                            lx, ly, lz);
+                                          
     normal_imu << lx,ly,-lz;
 }
 
@@ -316,19 +355,13 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
         sor.filter (*cloud_raw);
     }
 
-    // Transform pointcloud into robot base_frame
-    /*
-    tf::StampedTransform sensorToRobotTf;
-    try {
-        tfListener.lookupTransform(base_FrameId, input_cloud->header.frame_id, input_cloud->header.stamp, sensorToRobotTf);
-    } catch(tf::TransformException& ex){
-        ROS_ERROR_STREAM( "Transform error of sensor data: " << ex.what() << ", quitting callback");
-        return;
+    if(debug){
+        sensor_msgs::PointCloud2::Ptr VGF_msg (new sensor_msgs::PointCloud2 ());
+        pcl::toROSMsg(*cloud_raw, *VGF_msg);
+        VGF_msg->header.stamp = input_cloud->header.stamp;
+        VGF_msg->header.frame_id = input_cloud->header.frame_id;
+        VGF_pub_.publish(*VGF_msg);
     }
-    Eigen::Matrix4f sensorToRobot;
-    pcl_ros::transformAsMatrix(sensorToRobotTf, sensorToRobot);
-    pcl::transformPointCloud(*cloud_raw, *cloud_raw, sensorToRobot);
-    */
      
     // 2.Transform pointcloud w.r.t IMU reading
     Affine3d transform;
@@ -336,6 +369,14 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
     // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_org (new pcl::PointCloud<pcl::PointXYZ> ());
     pcl::transformPointCloud (*cloud_raw, *cloud_raw, transform);
     pcl::copyPointCloud<pcl::PointXYZ,pcl::PointXYZ>(*cloud_raw, *cloud);
+
+    if(debug){
+        sensor_msgs::PointCloud2::Ptr OA_msg (new sensor_msgs::PointCloud2 ());
+        pcl::toROSMsg(*cloud, *OA_msg);
+        OA_msg->header.stamp = input_cloud->header.stamp;
+        OA_msg->header.frame_id = input_cloud->header.frame_id;
+        OA_pub_.publish(*OA_msg);
+    }
 
     // 3.Apply voxel filter
     if(dense==true){
@@ -347,10 +388,18 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
     
     // 4.Clip based on box threshold.
     pcl::CropBox<pcl::PointXYZ> boxFilter;
-    boxFilter.setMin(Vector4f(-th_box_, -1.5, 0.1, 1.0));
+    boxFilter.setMin(Vector4f(-th_box_, -0.5*th_ceil_, 0.1, 1.0));
     boxFilter.setMax(Vector4f(th_box_, 2.0*sensor_height_, th_box_, 1.0));
     boxFilter.setInputCloud(cloud);
     boxFilter.filter(*cloud);
+
+    if(debug){
+        sensor_msgs::PointCloud2::Ptr BC_msg (new sensor_msgs::PointCloud2 ());
+        pcl::toROSMsg(*cloud, *BC_msg);
+        BC_msg->header.stamp = input_cloud->header.stamp;
+        BC_msg->header.frame_id = input_cloud->header.frame_id;
+        BC_pub_.publish(*BC_msg);
+    }
 
     // 5.Apply radius removal filter
     if (in_radius_>0){
@@ -360,6 +409,14 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
         outrem.setMinNeighborsInRadius (in_radius_);
         //outrem.setKeepOrganized(true);
         outrem.filter (*cloud);  
+    }
+
+    if(debug){
+        sensor_msgs::PointCloud2::Ptr ROR_msg (new sensor_msgs::PointCloud2 ());
+        pcl::toROSMsg(*cloud, *ROR_msg);
+        ROR_msg->header.stamp = input_cloud->header.stamp;
+        ROR_msg->header.frame_id = input_cloud->header.frame_id;
+        ROR_pub_.publish(*ROR_msg);
     }
 
     // 6.Apply statistical outlier removal
@@ -399,22 +456,32 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
         }else{ // Reach last iteration
             not_ground_pc->clear();
             for(size_t r=0;r<cloud_raw->points.size();r++){
-                double dist = double((*cloud_raw)[r].y);
-                double adj_th_ = 0.02*(*cloud_raw)[r].z;
-            	// double adj_th_ = 0.25*(pow(0.1*(*cloud_raw)[r].z,2));
-                if(SVD_refinement==true){
-                    Vector3d point;
-                    point << (*cloud_raw)[r].x,(*cloud_raw)[r].y,(*cloud_raw)[r].z;
-                    dist = point.dot(normal_); /////????????????????????????
-                }
-                if(dist>(th_dist_d_-adj_th_) && dist<(th_dist_d_+adj_th_+(3*th_dist_))){
-                    ground_pc->points.push_back((*cloud_raw)[r]);
-                }else if(dist<-th_ceil_){
-                    continue;
-                }else if(dist<=0.01){
-                    continue;
-                }else{
-                    not_ground_pc->points.push_back((*cloud_raw)[r]);
+                if((*cloud_raw)[r].z>0.01){
+                    double dist = double((*cloud_raw)[r].y);
+                    double adj_th_ = 0.02*(*cloud_raw)[r].z;
+                    if(SVD_refinement==true){
+                        Vector3d point;
+                        point << (*cloud_raw)[r].x,(*cloud_raw)[r].y,(*cloud_raw)[r].z;
+                        dist = point.dot(normal_);
+                    }
+                    if(dist>(th_dist_d_-adj_th_) && dist<(th_dist_d_+adj_th_+(3*th_dist_))){
+                        ground_pc->points.push_back((*cloud_raw)[r]);
+                    }else if(dist>=(th_dist_d_+adj_th_+(3*th_dist_))){
+                        if(detect_neg==true){
+                            not_ground_pc->points.push_back((*cloud_raw)[r]);
+                        }else{
+                            // Naive re-scale correction
+                            double scale_c = th_dist_d_/(*cloud_raw)[r].y;
+                            (*cloud_raw)[r].x = scale_c*(*cloud_raw)[r].x;
+                            (*cloud_raw)[r].y = scale_c*(*cloud_raw)[r].y;
+                            (*cloud_raw)[r].z = scale_c*(*cloud_raw)[r].z;
+                            ground_pc->points.push_back((*cloud_raw)[r]);
+                        }
+                    }else if(dist<-th_ceil_){
+                        continue;
+                    }else{
+                        not_ground_pc->points.push_back((*cloud_raw)[r]);
+                    }
                 }
             }
         }
@@ -425,20 +492,27 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
     // std::cout<< normal_imu <<std::endl;
 
     // publish ground points
-    sensor_msgs::PointCloud2 ground_msg;
-    pcl::toROSMsg(*ground_pc, ground_msg);
-    ground_msg.header.stamp = input_cloud->header.stamp;
-    ground_msg.header.frame_id = input_cloud->header.frame_id;
-    ground_points_pub_.publish(ground_msg);
+    sensor_msgs::PointCloud2::Ptr ground_msg (new sensor_msgs::PointCloud2 ());
+    pcl::toROSMsg(*ground_pc, *ground_msg);
+    ground_msg->header.stamp = input_cloud->header.stamp;
+    ground_msg->header.frame_id = input_cloud->header.frame_id;
+    ground_points_pub_.publish(*ground_msg);
     //publish not ground points
-    sensor_msgs::PointCloud2 groundless_msg;
-    pcl::toROSMsg(*not_ground_pc, groundless_msg);
-    groundless_msg.header.stamp = input_cloud->header.stamp;
-    groundless_msg.header.frame_id = input_cloud->header.frame_id;
-    groundless_points_pub_.publish(groundless_msg);
+    sensor_msgs::PointCloud2::Ptr groundless_msg (new sensor_msgs::PointCloud2 ());
+    pcl::toROSMsg(*not_ground_pc, *groundless_msg);
+    groundless_msg->header.stamp = input_cloud->header.stamp;
+    groundless_msg->header.frame_id = input_cloud->header.frame_id;
+    groundless_points_pub_.publish(*groundless_msg);
     //publish ground plane params
     pc_gps::gpParam gp_param;
     gp_param.header.stamp = input_cloud->header.stamp;
+    // std::cout<< "normal_imu:" <<std::endl;
+    // std::cout<< normal_imu <<std::endl;
+    if(SVD_refinement==true){
+        imuNormal_refine(normal_(0,0), normal_(1,0), normal_(2,0), q0_in, q1_in, q2_in, q3_in);
+    }
+    // std::cout<< "normal_imu after:" <<std::endl;
+    // std::cout<< normal_imu <<std::endl;
     for(int i=0; i<4; i++){
         if(i==3){
             gp_param.data[i] = d_;
