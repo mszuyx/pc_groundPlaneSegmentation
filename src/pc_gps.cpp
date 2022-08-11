@@ -79,8 +79,8 @@ private:
     void quaternionMultiplication(double p0, double p1, double p2, double p3, double q0, double q1, double q2, double q3, double& r0, double& r1, double& r2, double& r3);
     void rotateVectorByQuaternion(double x, double y, double z, double q0, double q1, double q2, double q3, double& vx, double& vy, double& vz);
     void quaternionToMatrix(double q0, double q1, double q2, double q3,  Affine3d& transform);
-    void imuNormal_update(double p0, double p1, double p2, double p3);
-    void imuNormal_refine(double ux, double uy, double uz, double q0, double q1, double q2, double q3);
+    // void imuNormal_update(double p0, double p1, double p2, double p3);
+    // void imuNormal_refine(double ux, double uy, double uz, double q0, double q1, double q2, double q3);
     void findMean(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, Vector3d& pc_mean);
     void estimate_plane_(void);
     void extract_initial_seeds_(const pcl::PointCloud<pcl::PointXYZ>::Ptr& p_sorted);
@@ -89,7 +89,7 @@ private:
     // Model parameter for ground plane fitting
     // The ground plane model is: ax+by+cz+d=0, here normal:=[a,b,c], d=d, th_dist_d_ = threshold_dist - d 
     double d_;
-    Vector3d normal_imu;
+    // Vector3d normal_imu;
     Vector3d normal_;
     double th_dist_d_;
     double last_lpr;
@@ -184,16 +184,7 @@ GroundPlaneSeg::GroundPlaneSeg():node_handle_("~"){
     ROS_INFO("Ground plane parameters topic: %s", gp_param_topic.c_str());
     gp_param_pub_ = node_handle_.advertise<pc_gps::gpParam>(gp_param_topic, 1);
 
-    // For demo===============================================================================================
-    /*
-    std::string no_ground_flat_topic;
-    node_handle_.param<std::string>("no_ground_flat_topic", no_ground_flat_topic, "/no_ground_flat");
-    ROS_INFO("Not Ground Output Point Cloud: %s", no_ground_flat_topic.c_str());
-    groundless_flat_msg_pub_ = node_handle_.advertise<sensor_msgs::PointCloud2>(no_ground_flat_topic, 1);
-    */
-    // =======================================================================================================
-
-    normal_imu << 0.0,1.0,0.0;
+    // normal_imu << 0.0,1.0,0.0;
     normal_ << 0.0,1.0,0.0;
     last_lpr = sensor_height_;
 }
@@ -234,36 +225,36 @@ void GroundPlaneSeg::quaternionToMatrix(double q0, double q1, double q2, double 
     transform = AngleAxisd(pitch+1.5708, Vector3d::UnitX()) * AngleAxisd(roll, Vector3d::UnitZ());
 }
 
-void GroundPlaneSeg::imuNormal_update(double q0, double q1, double q2, double q3){
-    // Rotate quaternion into proper frame:
-    double q0_, q1_, q2_, q3_; 
-    double q0_tf=0, q1_tf=0, q2_tf=0, q3_tf=1; 
-    quaternionMultiplication(q0, q1, q2, q3,
-                            q0_tf, q1_tf, q2_tf, q3_tf,
-                            q0_, q1_, q2_, q3_); 
-    double ux=0, uy=0, uz=1;
-    double lx, ly, lz;
-    rotateVectorByQuaternion(ux, uy, uz,
-                            q0_, -q1_, -q2_, -q3_, 
-                            lx, ly, lz);
+// void GroundPlaneSeg::imuNormal_update(double q0, double q1, double q2, double q3){
+//     // Rotate quaternion into proper frame:
+//     double q0_, q1_, q2_, q3_; 
+//     double q0_tf=0, q1_tf=0, q2_tf=0, q3_tf=1; 
+//     quaternionMultiplication(q0, q1, q2, q3,
+//                             q0_tf, q1_tf, q2_tf, q3_tf,
+//                             q0_, q1_, q2_, q3_); 
+//     double ux=0, uy=0, uz=1;
+//     double lx, ly, lz;
+//     rotateVectorByQuaternion(ux, uy, uz,
+//                             q0_, -q1_, -q2_, -q3_, 
+//                             lx, ly, lz);
                                             
-    normal_imu << lx,ly,-lz;
-}
+//     normal_imu << lx,ly,-lz;
+// }
 
-void GroundPlaneSeg::imuNormal_refine(double ux, double uy, double uz,double q0, double q1, double q2, double q3){
-    // Rotate quaternion into proper frame:
-    double q0_, q1_, q2_, q3_; 
-    double q0_tf=0, q1_tf=0, q2_tf=0, q3_tf=1; 
-    quaternionMultiplication(q0, q1, q2, q3,
-                            q0_tf, q1_tf, q2_tf, q3_tf,
-                            q0_, q1_, q2_, q3_);
-    double lx, ly, lz;
-    rotateVectorByQuaternion(ux, uz, uy,
-                            q0_, -q1_, -q2_, -q3_, 
-                            lx, ly, lz);
+// void GroundPlaneSeg::imuNormal_refine(double ux, double uy, double uz,double q0, double q1, double q2, double q3){
+//     // Rotate quaternion into proper frame:
+//     double q0_, q1_, q2_, q3_; 
+//     double q0_tf=0, q1_tf=0, q2_tf=0, q3_tf=1; 
+//     quaternionMultiplication(q0, q1, q2, q3,
+//                             q0_tf, q1_tf, q2_tf, q3_tf,
+//                             q0_, q1_, q2_, q3_);
+//     double lx, ly, lz;
+//     rotateVectorByQuaternion(ux, uz, uy,
+//                             q0_, -q1_, -q2_, -q3_, 
+//                             lx, ly, lz);
                                           
-    normal_imu << lx,ly,-lz;
-}
+//     normal_imu << lx,ly,-lz;
+// }
 
 void GroundPlaneSeg::findMean(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, Vector3d& pc_mean){
     double x_sum = 0;
@@ -321,7 +312,7 @@ void GroundPlaneSeg::extract_initial_seeds_(const pcl::PointCloud<pcl::PointXYZ>
     seeds_pc->clear();
     // iterate pointcloud, filter those height is less than lpr.height+th_seeds_
     for(size_t i=0;i<p_sorted->points.size();i++){
-        if(double(p_sorted->points[i].y) > lpr_height + th_seeds_){
+        if(double(p_sorted->points[i].y) > lpr_height - th_seeds_){
             seeds_pc->points.push_back(p_sorted->points[i]);
         }
     }
@@ -331,6 +322,7 @@ void GroundPlaneSeg::extract_initial_seeds_(const pcl::PointCloud<pcl::PointXYZ>
 
 void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& input_cloud, const sensor_msgs::Imu::ConstPtr& imu_msg){
     // ROS_INFO("callback"); 
+    // ros::Time begin = ros::Time::now();
 
     double q0_in, q1_in, q2_in, q3_in; 
     q0_in=imu_msg->orientation.w;
@@ -339,7 +331,7 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
     q3_in=imu_msg->orientation.z;
      
     // Update ground plane normal vector based on the assumption that the normal vector is parallel to the gravity vector                         
-    imuNormal_update(q0_in, q1_in, q2_in, q3_in);
+    // imuNormal_update(q0_in, q1_in, q2_in, q3_in);
 
     // 1.Convert pc to pcl::PointXYZ
     pcl::PCLPointCloud2::Ptr input_cloud_pcl (new pcl::PCLPointCloud2 ());
@@ -490,6 +482,10 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
     // std::cout<< normal_ <<std::endl;
     // std::cout<< "normal_imu:" <<std::endl;
     // std::cout<< normal_imu <<std::endl;
+    // std::cout<< "normal_corrected:" <<std::endl;
+    // std::cout<< transform.inverse()*normal_ <<std::endl;
+
+    // std::cout<<"walltime: "<< ros::Time::now()-begin<<std::endl;
 
     // publish ground points
     sensor_msgs::PointCloud2::Ptr ground_msg (new sensor_msgs::PointCloud2 ());
@@ -506,18 +502,14 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
     //publish ground plane params
     pc_gps::gpParam gp_param;
     gp_param.header.stamp = input_cloud->header.stamp;
-    // std::cout<< "normal_imu:" <<std::endl;
-    // std::cout<< normal_imu <<std::endl;
     if(SVD_refinement==true){
-        imuNormal_refine(normal_(0,0), normal_(1,0), normal_(2,0), q0_in, q1_in, q2_in, q3_in);
+        normal_=transform.inverse()*normal_;
     }
-    // std::cout<< "normal_imu after:" <<std::endl;
-    // std::cout<< normal_imu <<std::endl;
     for(int i=0; i<4; i++){
         if(i==3){
             gp_param.data[i] = d_;
         }else{
-            gp_param.data[i] = normal_imu(i,0);
+            gp_param.data[i] = normal_(i,0);
         }
     }
     gp_param_pub_.publish(gp_param);
