@@ -429,7 +429,7 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
 
     // 9. Ground plane fitter mainloop
     for(int i=0;i<num_iter_;i++){
-        estimate_plane_();
+        if(i>0){estimate_plane_();}
         // Clear memory
         ground_pc->clear();
         // Threshold filter
