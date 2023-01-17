@@ -2,14 +2,18 @@
 #include <ros/ros.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/Imu.h>
+#include <visualization_msgs/Marker.h>
+#include <geometry_msgs/Point.h>
 // Import PCL lib
 #include <pcl_ros/point_cloud.h>
 #include <pcl/common/transforms.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/filters/crop_box.h>
+#include <pcl/filters/approximate_voxel_grid.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/radius_outlier_removal.h>
 #include <pcl/filters/statistical_outlier_removal.h>
+#include <pcl/filters/passthrough.h>
 // Import Eigen lib
 #include <Eigen/Dense> 
 // Import message_filters lib
@@ -19,19 +23,16 @@
 // Custom msg type
 #include <pc_gps/gpParam.h>
 
-//#include <tf/transform_listener.h>
-//#include <pcl_ros/transforms.h>
-
 using namespace message_filters;
 using namespace Eigen;
 
 // Declare helper functions
 bool point_cmp(const pcl::PointXYZ a, const pcl::PointXYZ b){return a.y>b.y;}
 
-// Declare pc variables
-pcl::PointCloud<pcl::PointXYZ>::Ptr seeds_pc(new pcl::PointCloud<pcl::PointXYZ>());
+// Declare global variables
 pcl::PointCloud<pcl::PointXYZ>::Ptr ground_pc(new pcl::PointCloud<pcl::PointXYZ>());
 pcl::PointCloud<pcl::PointXYZ>::Ptr not_ground_pc(new pcl::PointCloud<pcl::PointXYZ>());
+double last_d_;
 
 class GroundPlaneSeg{
 public:
@@ -46,12 +47,14 @@ private:
     ros::Publisher OA_pub_; 
     ros::Publisher BC_pub_; 
     ros::Publisher ROR_pub_;
-    //tf::TransformListener tfListener;
+    ros::Publisher SEED_pub_;
+    ros::Publisher normal_vec_pub_;
+    ros::Publisher imu_vec_pub_;
 
     // Declare ROS params
     double sensor_height_;
     int num_iter_;
-    int num_lpr_;
+    double num_lpr_;
     double th_seeds_;
     double th_dist_;
     double th_ceil_;
@@ -64,9 +67,10 @@ private:
     int mean_k_;
     double alpha;
     bool SVD_refinement;
-    bool dense;
+    bool SVD_holdoff;
     bool detect_neg;
     bool debug;
+    bool timer;
     
     // Sync settings
     message_filters::Subscriber<sensor_msgs::PointCloud2> points_node_sub_;
@@ -79,9 +83,8 @@ private:
     void quaternionMultiplication(double p0, double p1, double p2, double p3, double q0, double q1, double q2, double q3, double& r0, double& r1, double& r2, double& r3);
     void rotateVectorByQuaternion(double x, double y, double z, double q0, double q1, double q2, double q3, double& vx, double& vy, double& vz);
     void quaternionToMatrix(double q0, double q1, double q2, double q3,  Affine3d& transform);
-    // void imuNormal_update(double p0, double p1, double p2, double p3);
-    // void imuNormal_refine(double ux, double uy, double uz, double q0, double q1, double q2, double q3);
-    void findMean(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, Vector3d& pc_mean);
+    // void findMean(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, int& cnt, double& pc_mean_y);
+    int findMean(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, double& mean_y);
     void estimate_plane_(void);
     void extract_initial_seeds_(const pcl::PointCloud<pcl::PointXYZ>::Ptr& p_sorted);
     void rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& input_cloud, const sensor_msgs::Imu::ConstPtr& imu_msg);
@@ -89,10 +92,9 @@ private:
     // Model parameter for ground plane fitting
     // The ground plane model is: ax+by+cz+d=0, here normal:=[a,b,c], d=d, th_dist_d_ = threshold_dist - d 
     double d_;
-    // Vector3d normal_imu;
     Vector3d normal_;
     double th_dist_d_;
-    double last_lpr;
+    
 };
 
 GroundPlaneSeg::GroundPlaneSeg():node_handle_("~"){
@@ -105,13 +107,13 @@ GroundPlaneSeg::GroundPlaneSeg():node_handle_("~"){
     node_handle_.param("num_iter", num_iter_, 3);
     ROS_INFO("Num of Iteration: %d", num_iter_);
 
-    node_handle_.param("num_lpr", num_lpr_, 400);
-    ROS_INFO("Num of LPR: %d", num_lpr_);
+    node_handle_.param("num_lpr", num_lpr_, 0.9);
+    ROS_INFO("Num of LPR: %f", num_lpr_);
 
-    node_handle_.param("th_seeds", th_seeds_, 0.5);
+    node_handle_.param("th_seeds", th_seeds_, 0.05);
     ROS_INFO("Seeds Threshold: %f", th_seeds_);
 
-    node_handle_.param("th_dist", th_dist_, 0.05);
+    node_handle_.param("th_dist", th_dist_, 0.02);
     ROS_INFO("Distance Threshold: %f", th_dist_);
 
     node_handle_.param("th_ceil_", th_ceil_, 1.0);
@@ -141,17 +143,14 @@ GroundPlaneSeg::GroundPlaneSeg():node_handle_("~"){
     node_handle_.param("SVD_refinement", SVD_refinement, false);
     ROS_INFO("Do SVD refinement?: %d", SVD_refinement);
 
-    node_handle_.param("dense", dense, false);
-    ROS_INFO("return dense point cloud?: %d", dense);
-
     node_handle_.param("detect_neg_obstacle", detect_neg, false);
     ROS_INFO("detect negative obstacles?: %d", detect_neg);
 
     node_handle_.param("debug", debug, false);
     ROS_INFO("Enter debug mode?: %d", debug);
 
-    //node_handle_.param<std::string>("frame_id", base_FrameId, "/base_link");
-    //ROS_INFO("robot base frame_id: %s", base_FrameId.c_str());
+    node_handle_.param("timer", timer, false);
+    ROS_INFO("Enter debug mode?: %d", timer);
 
     // Subscribe to realsense topic
     points_node_sub_.subscribe(node_handle_, "/cloud_in", 1); //5
@@ -170,7 +169,7 @@ GroundPlaneSeg::GroundPlaneSeg():node_handle_("~"){
     ground_points_pub_ = node_handle_.advertise<sensor_msgs::PointCloud2>(ground_topic, 1);
 
     if(debug){
-    std::string VGF_topic, OA_topic, BC_topic, ROR_topic;
+    std::string VGF_topic, OA_topic, BC_topic, ROR_topic, SEED_topic, normal_topic, imu_normal_topic;
     node_handle_.param<std::string>("VGF_topic", VGF_topic, "/gp_segmentation/cloud/VGF");
     VGF_pub_ = node_handle_.advertise<sensor_msgs::PointCloud2>(VGF_topic, 1);
     node_handle_.param<std::string>("OA_topic", OA_topic, "/gp_segmentation/cloud/OA");
@@ -179,14 +178,20 @@ GroundPlaneSeg::GroundPlaneSeg():node_handle_("~"){
     BC_pub_ = node_handle_.advertise<sensor_msgs::PointCloud2>(BC_topic, 1);
     node_handle_.param<std::string>("ROR_topic", ROR_topic, "/gp_segmentation/cloud/ROR");
     ROR_pub_ = node_handle_.advertise<sensor_msgs::PointCloud2>(ROR_topic, 1);
+    node_handle_.param<std::string>("SEED_topic", SEED_topic, "/gp_segmentation/cloud/SEED");
+    SEED_pub_ = node_handle_.advertise<sensor_msgs::PointCloud2>(SEED_topic, 1);
+
+    node_handle_.param<std::string>("normal_topic", normal_topic, "/gp_segmentation/normal");
+    normal_vec_pub_ = node_handle_.advertise<visualization_msgs::Marker>(normal_topic, 1);
+    node_handle_.param<std::string>("imu_normal_topic", imu_normal_topic, "/gp_segmentation/imu_normal");
+    imu_vec_pub_ = node_handle_.advertise<visualization_msgs::Marker>(imu_normal_topic, 1);
     }
     node_handle_.param<std::string>("groundplane_param_topic", gp_param_topic, "/gp_segmentation/param");
     ROS_INFO("Ground plane parameters topic: %s", gp_param_topic.c_str());
     gp_param_pub_ = node_handle_.advertise<pc_gps::gpParam>(gp_param_topic, 1);
 
-    // normal_imu << 0.0,1.0,0.0;
     normal_ << 0.0,1.0,0.0;
-    last_lpr = sensor_height_;
+    last_d_ = sensor_height_;
 }
 
 void GroundPlaneSeg::quaternionMultiplication(double p0, double p1, double p2, double p3,
@@ -225,56 +230,18 @@ void GroundPlaneSeg::quaternionToMatrix(double q0, double q1, double q2, double 
     transform = AngleAxisd(pitch+1.5708, Vector3d::UnitX()) * AngleAxisd(roll, Vector3d::UnitZ());
 }
 
-// void GroundPlaneSeg::imuNormal_update(double q0, double q1, double q2, double q3){
-//     // Rotate quaternion into proper frame:
-//     double q0_, q1_, q2_, q3_; 
-//     double q0_tf=0, q1_tf=0, q2_tf=0, q3_tf=1; 
-//     quaternionMultiplication(q0, q1, q2, q3,
-//                             q0_tf, q1_tf, q2_tf, q3_tf,
-//                             q0_, q1_, q2_, q3_); 
-//     double ux=0, uy=0, uz=1;
-//     double lx, ly, lz;
-//     rotateVectorByQuaternion(ux, uy, uz,
-//                             q0_, -q1_, -q2_, -q3_, 
-//                             lx, ly, lz);
-                                            
-//     normal_imu << lx,ly,-lz;
-// }
-
-// void GroundPlaneSeg::imuNormal_refine(double ux, double uy, double uz,double q0, double q1, double q2, double q3){
-//     // Rotate quaternion into proper frame:
-//     double q0_, q1_, q2_, q3_; 
-//     double q0_tf=0, q1_tf=0, q2_tf=0, q3_tf=1; 
-//     quaternionMultiplication(q0, q1, q2, q3,
-//                             q0_tf, q1_tf, q2_tf, q3_tf,
-//                             q0_, q1_, q2_, q3_);
-//     double lx, ly, lz;
-//     rotateVectorByQuaternion(ux, uz, uy,
-//                             q0_, -q1_, -q2_, -q3_, 
-//                             lx, ly, lz);
-                                          
-//     normal_imu << lx,ly,-lz;
-// }
-
-void GroundPlaneSeg::findMean(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, Vector3d& pc_mean){
-    double x_sum = 0;
-    double y_sum = 0;
-    double z_sum = 0;
+int GroundPlaneSeg::findMean(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, double& mean_y){
     int cnt = 0;
     for(size_t i=0;i<pc->points.size();i++){
-        x_sum += double(pc->points[i].x);
-        y_sum += double(pc->points[i].y);
-        z_sum += double(pc->points[i].z);
+        mean_y += double(pc->points[i].y);
         cnt++;
     }
-    x_sum = cnt!=0?x_sum/cnt:0;
-    y_sum = cnt!=0?y_sum/cnt:0;
-    z_sum = cnt!=0?z_sum/cnt:0;
-    pc_mean << x_sum,y_sum,z_sum;
+    mean_y = cnt!=0?mean_y/cnt:0;
+    return cnt;
 }
 
 void GroundPlaneSeg::estimate_plane_(void){
-    if(SVD_refinement==true){
+    if(SVD_refinement==true && SVD_holdoff==false){
         // Create covarian matrix in single pass.
         Matrix3d cov;
         Vector4d pc_mean;
@@ -287,10 +254,11 @@ void GroundPlaneSeg::estimate_plane_(void){
         Vector3d seeds_mean = pc_mean.head<3>();
         //according to normal.T*[x,y,z] = -d
         d_ = -(normal_.transpose()*seeds_mean)(0,0);
+        std::cout<< "check" <<std::endl;
     }else{
-        Vector3d seeds_mean;
-        findMean(ground_pc, seeds_mean);
-        d_ = -seeds_mean[1];
+        double pc_mean_y = 0.0;
+        findMean(ground_pc, pc_mean_y);
+        d_ = -pc_mean_y;
     }
     // set distance threhold to `th_dist - d`
     th_dist_d_ = -(th_dist_ + d_);
@@ -299,39 +267,35 @@ void GroundPlaneSeg::estimate_plane_(void){
 
 void GroundPlaneSeg::extract_initial_seeds_(const pcl::PointCloud<pcl::PointXYZ>::Ptr& p_sorted){
     // LPR is the mean of low point representative
-    double sum = 0;
-    int cnt = 0;
     // Calculate the mean height value.
-    for(size_t i=0;i<p_sorted->points.size() && cnt<num_lpr_;i++){
-        sum += double(p_sorted->points[i].y);
-        cnt++;
+    double lpr_height = 0.0;
+    int cnt = findMean(p_sorted, lpr_height);
+    if(cnt<500){
+        lpr_height = last_d_;
+        SVD_holdoff = true;
+    }else{
+        SVD_holdoff = false;
     }
-    double lpr_height = cnt!=0?sum/cnt:0;// in case divide by 0
-    lpr_height = (alpha*last_lpr) + ((1-alpha)*lpr_height);
-
-    seeds_pc->clear();
-    // iterate pointcloud, filter those height is less than lpr.height+th_seeds_
-    for(size_t i=0;i<p_sorted->points.size();i++){
-        if(double(p_sorted->points[i].y) > lpr_height - th_seeds_){
-            seeds_pc->points.push_back(p_sorted->points[i]);
-        }
-    }
-    last_lpr = lpr_height;
+  
+    ground_pc->clear();
+    // filter those height is less than lpr.height+th_seeds_ 
+    pcl::PassThrough<pcl::PointXYZ> pass;
+    pass.setInputCloud (p_sorted);
+    pass.setFilterFieldName ("y");
+    pass.setFilterLimits (lpr_height - th_seeds_, 1.5*lpr_height);
+    pass.filter (*ground_pc);
     // update seeds points
 }
 
 void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& input_cloud, const sensor_msgs::Imu::ConstPtr& imu_msg){
     // ROS_INFO("callback"); 
-    // ros::Time begin = ros::Time::now();
-
+    ros::Time begin = ros::Time::now();
+    
     double q0_in, q1_in, q2_in, q3_in; 
     q0_in=imu_msg->orientation.w;
     q1_in=imu_msg->orientation.x;
     q2_in=imu_msg->orientation.y;
     q3_in=imu_msg->orientation.z;
-     
-    // Update ground plane normal vector based on the assumption that the normal vector is parallel to the gravity vector                         
-    // imuNormal_update(q0_in, q1_in, q2_in, q3_in);
 
     // 1.Convert pc to pcl::PointXYZ
     pcl::PCLPointCloud2::Ptr input_cloud_pcl (new pcl::PCLPointCloud2 ());
@@ -340,21 +304,6 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZ> ());
     pcl::fromPCLPointCloud2(*input_cloud_pcl, *cloud_raw);
 
-    if(dense==false){
-        pcl::VoxelGrid<pcl::PointXYZ> sor;
-        sor.setInputCloud (cloud_raw);
-        sor.setLeafSize (float (0.3*map_unit_size_),float (map_unit_size_),float (0.3*map_unit_size_));
-        sor.filter (*cloud_raw);
-    }
-
-    if(debug){
-        sensor_msgs::PointCloud2::Ptr VGF_msg (new sensor_msgs::PointCloud2 ());
-        pcl::toROSMsg(*cloud_raw, *VGF_msg);
-        VGF_msg->header.stamp = input_cloud->header.stamp;
-        VGF_msg->header.frame_id = input_cloud->header.frame_id;
-        VGF_pub_.publish(*VGF_msg);
-    }
-     
     // 2.Transform pointcloud w.r.t IMU reading
     Affine3d transform;
     quaternionToMatrix(q0_in, q1_in, q2_in, q3_in, transform);
@@ -371,11 +320,18 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
     }
 
     // 3.Apply voxel filter
-    if(dense==true){
-        pcl::VoxelGrid<pcl::PointXYZ> sor;
-        sor.setInputCloud (cloud);
-        sor.setLeafSize (float (0.3*map_unit_size_),float (map_unit_size_),float (0.3*map_unit_size_));
-        sor.filter (*cloud);
+    // pcl::VoxelGrid<pcl::PointXYZ> sor;
+    pcl::ApproximateVoxelGrid<pcl::PointXYZ> sor;
+    sor.setInputCloud (cloud);
+    sor.setLeafSize (float (0.2*map_unit_size_),float (2),float (0.2*map_unit_size_));
+    sor.filter (*cloud);
+
+    if(debug){
+        sensor_msgs::PointCloud2::Ptr VGF_msg (new sensor_msgs::PointCloud2 ());
+        pcl::toROSMsg(*cloud, *VGF_msg);
+        VGF_msg->header.stamp = input_cloud->header.stamp;
+        VGF_msg->header.frame_id = input_cloud->header.frame_id;
+        VGF_pub_.publish(*VGF_msg);
     }
     
     // 4.Clip based on box threshold.
@@ -425,23 +381,33 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
 
     // 8. Extract init ground seeds
     extract_initial_seeds_(cloud);
-    ground_pc = seeds_pc;
+    // ground_pc = seeds_pc;
+    pcl::copyPointCloud<pcl::PointXYZ,pcl::PointXYZ>(*ground_pc, *cloud);
+    // cloud = ground_pc;
+
+    if(debug){
+        sensor_msgs::PointCloud2::Ptr SEED_msg (new sensor_msgs::PointCloud2 ());
+        pcl::toROSMsg(*cloud, *SEED_msg);
+        SEED_msg->header.stamp = input_cloud->header.stamp;
+        SEED_msg->header.frame_id = input_cloud->header.frame_id;
+        SEED_pub_.publish(*SEED_msg);
+    }
 
     // 9. Ground plane fitter mainloop
     for(int i=0;i<num_iter_;i++){
-        if(i>0){estimate_plane_();}
+        estimate_plane_();
         // Clear memory
         ground_pc->clear();
         // Threshold filter
         if(i<num_iter_-1){
             for(size_t r=0;r<cloud->points.size();r++){
                 double dist = double((*cloud)[r].y);
-                if(SVD_refinement==true && i>0){
+                if(SVD_refinement==true && SVD_holdoff==false){ // && i>0
                     Vector3d point;
                     point << (*cloud)[r].x,(*cloud)[r].y,(*cloud)[r].z;
                     dist = point.dot(normal_);
                 }
-                if(dist>th_dist_d_){ // Maybe add a "<" constraint?//
+                if(dist>th_dist_d_){
                     ground_pc->points.push_back((*cloud)[r]);
                 }
             } 
@@ -450,23 +416,25 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
             for(size_t r=0;r<cloud_raw->points.size();r++){
                 if((*cloud_raw)[r].z>0.01){
                     double dist = double((*cloud_raw)[r].y);
-                    double adj_th_ = 0.02*(*cloud_raw)[r].z;
-                    if(SVD_refinement==true){
+                    // double adj_th_ = 0.01*(*cloud_raw)[r].z;
+                    if(SVD_refinement==true && SVD_holdoff==false){
                         Vector3d point;
                         point << (*cloud_raw)[r].x,(*cloud_raw)[r].y,(*cloud_raw)[r].z;
                         dist = point.dot(normal_);
                     }
-                    if(dist>(th_dist_d_-adj_th_) && dist<(th_dist_d_+adj_th_+(3*th_dist_))){
+                    // if(dist>(th_dist_d_-adj_th_) && dist<(th_dist_d_+adj_th_+(3*th_dist_))){
+                    if(dist>(th_dist_d_) && dist<(th_dist_d_+(3*th_dist_))){
                         ground_pc->points.push_back((*cloud_raw)[r]);
-                    }else if(dist>=(th_dist_d_+adj_th_+(3*th_dist_))){
+                    // }else if(dist>=(th_dist_d_+adj_th_+(3*th_dist_))){
+                    }else if(dist>=(th_dist_d_+(3*th_dist_))){
                         if(detect_neg==true){
                             not_ground_pc->points.push_back((*cloud_raw)[r]);
                         }else{
                             // Naive re-scale correction
-                            double scale_c = th_dist_d_/(*cloud_raw)[r].y;
-                            (*cloud_raw)[r].x = scale_c*(*cloud_raw)[r].x;
-                            (*cloud_raw)[r].y = scale_c*(*cloud_raw)[r].y;
-                            (*cloud_raw)[r].z = scale_c*(*cloud_raw)[r].z;
+                            // double scale_c = th_dist_d_/(*cloud_raw)[r].y;
+                            // (*cloud_raw)[r].x = scale_c*(*cloud_raw)[r].x;
+                            // (*cloud_raw)[r].y = scale_c*(*cloud_raw)[r].y;
+                            // (*cloud_raw)[r].z = scale_c*(*cloud_raw)[r].z;
                             ground_pc->points.push_back((*cloud_raw)[r]);
                         }
                     }else if(dist<-th_ceil_){
@@ -478,14 +446,11 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
             }
         }
     }
-    // std::cout<< "normal_:" <<std::endl;
-    // std::cout<< normal_ <<std::endl;
-    // std::cout<< "normal_imu:" <<std::endl;
-    // std::cout<< normal_imu <<std::endl;
-    // std::cout<< "normal_corrected:" <<std::endl;
-    // std::cout<< transform.inverse()*normal_ <<std::endl;
+    last_d_ = d_;
 
-    // std::cout<<"walltime: "<< ros::Time::now()-begin<<std::endl;
+    if(timer){
+        std::cout<<"walltime: "<< ros::Time::now()-begin<<std::endl;
+    }
 
     // publish ground points
     sensor_msgs::PointCloud2::Ptr ground_msg (new sensor_msgs::PointCloud2 ());
@@ -502,7 +467,7 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
     //publish ground plane params
     pc_gps::gpParam gp_param;
     gp_param.header.stamp = input_cloud->header.stamp;
-    if(SVD_refinement==true){
+    if(SVD_refinement==true && SVD_holdoff==false){
         normal_=transform.inverse()*normal_;
     }
     for(int i=0; i<4; i++){
@@ -513,6 +478,46 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
         }
     }
     gp_param_pub_.publish(gp_param);
+
+    if(debug){
+        visualization_msgs::Marker normal_vector;
+        normal_vector.header = gp_param.header;
+        normal_vector.header.frame_id = "d455_link";
+        normal_vector.scale.x = 0.1;
+        normal_vector.color.b = 1.0;
+        normal_vector.color.a = 1.0;
+        normal_vector.action = visualization_msgs::Marker::ADD;
+        normal_vector.pose.orientation.w = 1.0;
+        geometry_msgs::Point p0;
+        p0.x = p0.y = p0.z = 0;
+        p0.z = d_;
+        geometry_msgs::Point p1;
+        p1.x = -normal_(2,0);
+        p1.y = normal_(0,0);
+        p1.z = normal_(1,0);
+        normal_vector.points.push_back(p0);
+        normal_vector.points.push_back(p1);
+        normal_vec_pub_.publish(normal_vector);
+
+        visualization_msgs::Marker imu_vector;
+        imu_vector.header = gp_param.header;
+        imu_vector.header.frame_id = "d455_link";
+        imu_vector.scale.x = 0.15;
+        imu_vector.color.r = 1.0;
+        imu_vector.color.a = 1.0;
+        imu_vector.action = visualization_msgs::Marker::ADD;
+        imu_vector.pose.orientation.w = 1.0;
+        p0.x = p0.y = p0.z = 0;
+        p0.z = d_;
+        normal_ << 0.0,1.0,0.0;
+        normal_=transform.inverse()*normal_;
+        p1.x = -normal_(2,0);
+        p1.y = normal_(0,0);
+        p1.z = normal_(1,0);
+        imu_vector.points.push_back(p0);
+        imu_vector.points.push_back(p1);
+        imu_vec_pub_.publish(imu_vector);
+    }
 }
 
 int main (int argc, char** argv) {
