@@ -44,6 +44,7 @@
     <param name="num_lpr"                   type = "double"      value = "0.7"/>
     <param name="th_seeds"                  type = "double"      value = "0.05"/><!--0.5-->
     <param name="th_dist"                   type = "double"      value = "0.03"/><!--0.1-->
+    <param name="block_thres_"              type = "double"      value = "0.3"/>
     <param name="th_ceil_"                  type = "double"      value = "$(arg grid_height)"/>
     <param name="th_box_"                   type = "double"      value = "$(arg max_sensing_range)"/>
     <param name="map_unit_size_"            type = "double"      value = "$(arg grid_unit_size)"/>
@@ -52,10 +53,9 @@
     <param name="std_th_"                   type = "double"      value = "0.1"/>
     <param name="mean_k_"                   type = "int"         value = "-15"/>
     <param name="alpha"                     type = "double"      value = "0.1"/>
-    <param name="SVD_refinement"            type = "bool"        value = "false"/>
-    <param name="dense"                     type = "bool"        value = "true"/>
+    <param name="SVD_refinement"            type = "bool"        value = "true"/>
     <param name="detect_neg_obstacle"       type = "bool"        value = "false"/>
-    <param name="debug"                     type = "bool"        value = "true"/>
+    <param name="debug"                     type = "bool"        value = "false"/>
     <param name="timer"                     type = "bool"        value = "false"/>
   </node>
   
