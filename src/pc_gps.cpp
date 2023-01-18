@@ -12,7 +12,7 @@
 #include <pcl/filters/approximate_voxel_grid.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/radius_outlier_removal.h>
-#include <pcl/filters/statistical_outlier_removal.h>
+// #include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/filters/passthrough.h>
 // Import Eigen lib
 #include <Eigen/Dense> 
@@ -59,6 +59,7 @@ private:
     double th_dist_;
     double th_ceil_;
     double th_box_;
+    double block_thres_;
     double map_unit_size_;
     std::string base_FrameId;
     double radius_search_;
@@ -84,7 +85,8 @@ private:
     void rotateVectorByQuaternion(double x, double y, double z, double q0, double q1, double q2, double q3, double& vx, double& vy, double& vz);
     void quaternionToMatrix(double q0, double q1, double q2, double q3,  Affine3d& transform);
     // void findMean(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, int& cnt, double& pc_mean_y);
-    int findMean(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, double& mean_y);
+    int findMean(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, double& mean_y, const double percentage);
+    bool checkBlock(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, const double z_threshold);
     void estimate_plane_(void);
     void extract_initial_seeds_(const pcl::PointCloud<pcl::PointXYZ>::Ptr& p_sorted);
     void rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& input_cloud, const sensor_msgs::Imu::ConstPtr& imu_msg);
@@ -121,6 +123,9 @@ GroundPlaneSeg::GroundPlaneSeg():node_handle_("~"){
 
     node_handle_.param("th_box_", th_box_, 7.0);
     ROS_INFO("Box Threshold: %f", th_box_);
+
+    node_handle_.param("block_thres_", block_thres_, 0.4);
+    ROS_INFO("Blockage Threshold: %f", block_thres_);
 
     node_handle_.param("map_unit_size_", map_unit_size_, 0.15); 
     ROS_INFO("map_unit_size_: %f", map_unit_size_);
@@ -230,11 +235,18 @@ void GroundPlaneSeg::quaternionToMatrix(double q0, double q1, double q2, double 
     transform = AngleAxisd(pitch+1.5708, Vector3d::UnitX()) * AngleAxisd(roll, Vector3d::UnitZ());
 }
 
-int GroundPlaneSeg::findMean(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, double& mean_y){
+int GroundPlaneSeg::findMean(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, double& mean_y, const double percentage){
     int cnt = 0;
-    for(size_t i=0;i<pc->points.size();i++){
-        mean_y += double(pc->points[i].y);
-        cnt++;
+    if (percentage>0){
+        for(size_t i=0;i<pc->points.size() && cnt<int(num_lpr_*pc->points.size());i++){
+            mean_y += double(pc->points[i].y);
+            cnt++;
+        }
+    }else{
+        for(size_t i=0;i<pc->points.size();i++){
+            mean_y += double(pc->points[i].y);
+            cnt++;
+        }
     }
     mean_y = cnt!=0?mean_y/cnt:0;
     return cnt;
@@ -254,10 +266,9 @@ void GroundPlaneSeg::estimate_plane_(void){
         Vector3d seeds_mean = pc_mean.head<3>();
         //according to normal.T*[x,y,z] = -d
         d_ = -(normal_.transpose()*seeds_mean)(0,0);
-        std::cout<< "check" <<std::endl;
     }else{
         double pc_mean_y = 0.0;
-        findMean(ground_pc, pc_mean_y);
+        findMean(ground_pc, pc_mean_y, -1);
         d_ = -pc_mean_y;
     }
     // set distance threhold to `th_dist - d`
@@ -265,20 +276,37 @@ void GroundPlaneSeg::estimate_plane_(void){
     // update the equation parameters
 }
 
+bool GroundPlaneSeg::checkBlock(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, const double z_threshold){
+    if(pc->points.size()<100){
+        return true;
+    }
+    double mean_z = 0.0;
+    int cnt = 0;
+    for(size_t i=0;i<pc->points.size();i++){
+        mean_z += double(pc->points[i].z);
+        cnt++;
+    }
+    mean_z = cnt!=0?mean_z/cnt:0;
+    if(mean_z<z_threshold){
+        return true;
+    }else{
+        return false;
+    }
+}
+
 void GroundPlaneSeg::extract_initial_seeds_(const pcl::PointCloud<pcl::PointXYZ>::Ptr& p_sorted){
     // LPR is the mean of low point representative
     // Calculate the mean height value.
     double lpr_height = 0.0;
-    int cnt = findMean(p_sorted, lpr_height);
-    if(cnt<500){
-        lpr_height = last_d_;
+    int cnt = findMean(p_sorted, lpr_height, num_lpr_);
+    if(cnt<300){
         SVD_holdoff = true;
     }else{
         SVD_holdoff = false;
     }
   
     ground_pc->clear();
-    // filter those height is less than lpr.height+th_seeds_ 
+    // filter those height are less than lpr.height+th_seeds_ 
     pcl::PassThrough<pcl::PointXYZ> pass;
     pass.setInputCloud (p_sorted);
     pass.setFilterFieldName ("y");
@@ -309,6 +337,13 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
     quaternionToMatrix(q0_in, q1_in, q2_in, q3_in, transform);
     // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_org (new pcl::PointCloud<pcl::PointXYZ> ());
     pcl::transformPointCloud (*cloud_raw, *cloud_raw, transform);
+
+    // 3.Clip based on box threshold.
+    pcl::CropBox<pcl::PointXYZ> boxFilter;
+    boxFilter.setMin(Vector4f(-th_box_, -th_ceil_, 0.1, 1.0));
+    boxFilter.setMax(Vector4f(th_box_, 2.0*sensor_height_, th_box_, 1.0));
+    boxFilter.setInputCloud(cloud_raw);
+    boxFilter.filter(*cloud_raw);
     pcl::copyPointCloud<pcl::PointXYZ,pcl::PointXYZ>(*cloud_raw, *cloud);
 
     if(debug){
@@ -333,14 +368,14 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
         VGF_msg->header.frame_id = input_cloud->header.frame_id;
         VGF_pub_.publish(*VGF_msg);
     }
-    
-    // 4.Clip based on box threshold.
-    pcl::CropBox<pcl::PointXYZ> boxFilter;
-    boxFilter.setMin(Vector4f(-th_box_, -0.5*th_ceil_, 0.1, 1.0));
-    boxFilter.setMax(Vector4f(th_box_, 2.0*sensor_height_, th_box_, 1.0));
-    boxFilter.setInputCloud(cloud);
-    boxFilter.filter(*cloud);
 
+    // 4. Filter those points above camera
+    pcl::PassThrough<pcl::PointXYZ> pass;
+    pass.setInputCloud (cloud);
+    pass.setFilterFieldName ("y");
+    pass.setFilterLimits (0.1, 2.0*sensor_height_);
+    pass.filter (*cloud);
+    
     if(debug){
         sensor_msgs::PointCloud2::Ptr BC_msg (new sensor_msgs::PointCloud2 ());
         pcl::toROSMsg(*cloud, *BC_msg);
@@ -367,86 +402,107 @@ void GroundPlaneSeg::rs_pc_callback_ (const sensor_msgs::PointCloud2::ConstPtr& 
         ROR_pub_.publish(*ROR_msg);
     }
 
-    // 6.Apply statistical outlier removal
-    if (mean_k_>0){
-        pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
-        sor.setInputCloud (cloud);
-        sor.setMeanK (mean_k_);
-        sor.setStddevMulThresh (std_th_);
-        sor.filter (*cloud);
+    // 6.Check if camera got block
+    bool block = false;
+    if(block_thres_>0){
+        block = checkBlock(cloud, block_thres_);
     }
-
-    // 7.Sort on Y-axis value
-    sort(cloud->points.begin(),cloud->end(),point_cmp);
-
-    // 8. Extract init ground seeds
-    extract_initial_seeds_(cloud);
-    // ground_pc = seeds_pc;
-    pcl::copyPointCloud<pcl::PointXYZ,pcl::PointXYZ>(*ground_pc, *cloud);
-    // cloud = ground_pc;
 
     if(debug){
-        sensor_msgs::PointCloud2::Ptr SEED_msg (new sensor_msgs::PointCloud2 ());
-        pcl::toROSMsg(*cloud, *SEED_msg);
-        SEED_msg->header.stamp = input_cloud->header.stamp;
-        SEED_msg->header.frame_id = input_cloud->header.frame_id;
-        SEED_pub_.publish(*SEED_msg);
+        std::cout<< "block:" <<std::endl;
+        std::cout<< block <<std::endl;
     }
 
-    // 9. Ground plane fitter mainloop
-    for(int i=0;i<num_iter_;i++){
-        estimate_plane_();
-        // Clear memory
-        ground_pc->clear();
-        // Threshold filter
-        if(i<num_iter_-1){
-            for(size_t r=0;r<cloud->points.size();r++){
-                double dist = double((*cloud)[r].y);
-                if(SVD_refinement==true && SVD_holdoff==false){ // && i>0
-                    Vector3d point;
-                    point << (*cloud)[r].x,(*cloud)[r].y,(*cloud)[r].z;
-                    dist = point.dot(normal_);
-                }
-                if(dist>th_dist_d_){
-                    ground_pc->points.push_back((*cloud)[r]);
-                }
-            } 
-        }else{ // Reach last iteration
-            not_ground_pc->clear();
-            for(size_t r=0;r<cloud_raw->points.size();r++){
-                if((*cloud_raw)[r].z>0.01){
-                    double dist = double((*cloud_raw)[r].y);
-                    // double adj_th_ = 0.01*(*cloud_raw)[r].z;
-                    if(SVD_refinement==true && SVD_holdoff==false){
+    if(block == false){
+        // 7.Sort on Y-axis value
+        sort(cloud->points.begin(),cloud->end(),point_cmp);
+
+        // 8. Extract init ground seeds
+        extract_initial_seeds_(cloud);
+        pcl::copyPointCloud<pcl::PointXYZ,pcl::PointXYZ>(*ground_pc, *cloud);
+
+        if(debug){
+            sensor_msgs::PointCloud2::Ptr SEED_msg (new sensor_msgs::PointCloud2 ());
+            pcl::toROSMsg(*cloud, *SEED_msg);
+            SEED_msg->header.stamp = input_cloud->header.stamp;
+            SEED_msg->header.frame_id = input_cloud->header.frame_id;
+            SEED_pub_.publish(*SEED_msg);
+        }
+
+        // 9. Ground plane fitter mainloop
+        for(int i=0;i<num_iter_;i++){
+            estimate_plane_();
+            // Clear memory
+            ground_pc->clear();
+            // Threshold filter
+            if(i<num_iter_-1){
+                for(size_t r=0;r<cloud->points.size();r++){
+                    double dist = double((*cloud)[r].y);
+                    if(SVD_refinement==true && SVD_holdoff==false){ // && i>0
                         Vector3d point;
-                        point << (*cloud_raw)[r].x,(*cloud_raw)[r].y,(*cloud_raw)[r].z;
+                        point << (*cloud)[r].x,(*cloud)[r].y,(*cloud)[r].z;
                         dist = point.dot(normal_);
                     }
-                    // if(dist>(th_dist_d_-adj_th_) && dist<(th_dist_d_+adj_th_+(3*th_dist_))){
-                    if(dist>(th_dist_d_) && dist<(th_dist_d_+(3*th_dist_))){
-                        ground_pc->points.push_back((*cloud_raw)[r]);
-                    // }else if(dist>=(th_dist_d_+adj_th_+(3*th_dist_))){
-                    }else if(dist>=(th_dist_d_+(3*th_dist_))){
-                        if(detect_neg==true){
-                            not_ground_pc->points.push_back((*cloud_raw)[r]);
-                        }else{
-                            // Naive re-scale correction
-                            // double scale_c = th_dist_d_/(*cloud_raw)[r].y;
-                            // (*cloud_raw)[r].x = scale_c*(*cloud_raw)[r].x;
-                            // (*cloud_raw)[r].y = scale_c*(*cloud_raw)[r].y;
-                            // (*cloud_raw)[r].z = scale_c*(*cloud_raw)[r].z;
-                            ground_pc->points.push_back((*cloud_raw)[r]);
+                    if(dist>th_dist_d_){
+                        ground_pc->points.push_back((*cloud)[r]);
+                    }
+                } 
+            }else{ // Reach last iteration
+                not_ground_pc->clear();
+                for(size_t r=0;r<cloud_raw->points.size();r++){
+                    if((*cloud_raw)[r].z>0.01){
+                        double dist = double((*cloud_raw)[r].y);
+                        // double adj_th_ = 0.01*(*cloud_raw)[r].z;
+                        if(SVD_refinement==true && SVD_holdoff==false){
+                            Vector3d point;
+                            point << (*cloud_raw)[r].x,(*cloud_raw)[r].y,(*cloud_raw)[r].z;
+                            dist = point.dot(normal_);
                         }
-                    }else if(dist<-th_ceil_){
-                        continue;
-                    }else{
-                        not_ground_pc->points.push_back((*cloud_raw)[r]);
+                        // if(dist>(th_dist_d_-adj_th_) && dist<(th_dist_d_+adj_th_+(3*th_dist_))){
+                        if(dist>(th_dist_d_) && dist<(th_dist_d_+(3*th_dist_))){
+                            ground_pc->points.push_back((*cloud_raw)[r]);
+                        // }else if(dist>=(th_dist_d_+adj_th_+(3*th_dist_))){
+                        }else if(dist>=(th_dist_d_+(3*th_dist_))){
+                            if(detect_neg==true){
+                                not_ground_pc->points.push_back((*cloud_raw)[r]);
+                            }else{
+                                // Naive re-scale correction
+                                // double scale_c = th_dist_d_/(*cloud_raw)[r].y;
+                                // (*cloud_raw)[r].x = scale_c*(*cloud_raw)[r].x;
+                                // (*cloud_raw)[r].y = scale_c*(*cloud_raw)[r].y;
+                                // (*cloud_raw)[r].z = scale_c*(*cloud_raw)[r].z;
+                                ground_pc->points.push_back((*cloud_raw)[r]);
+                            }
+                        // }else if(dist<-th_ceil_){
+                        //     continue;
+                        }else{
+                            not_ground_pc->points.push_back((*cloud_raw)[r]);
+                        }
                     }
                 }
             }
         }
+        last_d_ = th_dist_d_;
+    }else{
+        ground_pc->clear();
+        not_ground_pc->clear();
+        for(size_t r=0;r<cloud_raw->points.size();r++){
+            if((*cloud_raw)[r].z>0.01){
+                double dist = double((*cloud_raw)[r].y);
+                if(dist>(last_d_) && dist<(last_d_+(3*th_dist_))){
+                    ground_pc->points.push_back((*cloud_raw)[r]);
+                }else if(dist>=(last_d_+(3*th_dist_))){
+                    if(detect_neg==true){
+                        not_ground_pc->points.push_back((*cloud_raw)[r]);
+                    }else{
+                        ground_pc->points.push_back((*cloud_raw)[r]);
+                    }
+                }else{
+                    not_ground_pc->points.push_back((*cloud_raw)[r]);
+                }
+            }
+        }
     }
-    last_d_ = d_;
 
     if(timer){
         std::cout<<"walltime: "<< ros::Time::now()-begin<<std::endl;
