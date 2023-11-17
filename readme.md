@@ -1,4 +1,4 @@
-A ROS node to perform `ground plane fitting` for Realsense camera pointcloud.
+A ROS node to perform ground plane segmentation for Realsense camera point cloud.
 ![image](https://github.com/mszuyx/pc_groundPlaneSegmentation/assets/37651144/0d1806c7-028f-4787-9d31-e128e1ee3f98)
 
 The algorithm was inspired by:
